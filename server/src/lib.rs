@@ -10,18 +10,15 @@ extern crate error_chain;
 extern crate log;
 
 use audio_thread_priority::promote_current_thread_to_real_time;
-use audioipc::core;
-use audioipc::framing::framed;
-use audioipc::rpc;
-use audioipc::{MessageStream, PlatformHandle, PlatformHandleType};
-use futures::sync::oneshot;
-use futures::Future;
+use audioipc::ipccore;
+use audioipc::sys;
+use audioipc::PlatformHandleType;
 use once_cell::sync::Lazy;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_void;
 use std::ptr;
 use std::sync::Mutex;
-use tokio::reactor;
+use std::thread;
 
 mod server;
 
@@ -38,8 +35,8 @@ static G_CUBEB_CONTEXT_PARAMS: Lazy<Mutex<CubebContextParams>> = Lazy::new(|| {
 });
 
 #[allow(deprecated)]
+#[allow(clippy::upper_case_acronyms)]
 pub mod errors {
-    #![allow(clippy::upper_case_acronyms)]
     error_chain! {
         links {
             AudioIPC(::audioipc::errors::Error, ::audioipc::errors::ErrorKind);
@@ -47,7 +44,6 @@ pub mod errors {
         foreign_links {
             Cubeb(cubeb_core::Error);
             Io(::std::io::Error);
-            Canceled(::futures::sync::oneshot::Canceled);
         }
     }
 }
@@ -55,14 +51,14 @@ pub mod errors {
 use crate::errors::*;
 
 struct ServerWrapper {
-    core_thread: core::CoreThread,
-    callback_thread: core::CoreThread,
+    rpc_thread: ipccore::EventLoopThread,
+    callback_thread: ipccore::EventLoopThread,
+    device_collection_thread: ipccore::EventLoopThread,
 }
 
 fn register_thread(callback: Option<extern "C" fn(*const ::std::os::raw::c_char)>) {
     if let Some(func) = callback {
-        let thr = std::thread::current();
-        let name = CString::new(thr.name().unwrap()).unwrap();
+        let name = CString::new(thread::current().name().unwrap()).unwrap();
         func(name.as_ptr());
     }
 }
@@ -77,52 +73,71 @@ fn init_threads(
     thread_create_callback: Option<extern "C" fn(*const ::std::os::raw::c_char)>,
     thread_destroy_callback: Option<extern "C" fn()>,
 ) -> Result<ServerWrapper> {
-    trace!("Starting up cubeb audio server event loop thread...");
-
-    let callback_thread = core::spawn_thread(
-        "AudioIPC Callback RPC",
+    let rpc_name = "AudioIPC Server RPC";
+    let rpc_thread = ipccore::EventLoopThread::new(
+        rpc_name.to_string(),
+        None,
         move || {
-            match promote_current_thread_to_real_time(0, 48000) {
-                Ok(_) => {}
-                Err(_) => {
-                    debug!("Failed to promote audio callback thread to real-time.");
-                }
-            }
+            trace!("Starting {} thread", rpc_name);
             register_thread(thread_create_callback);
-            trace!("Starting up cubeb audio callback event loop thread...");
-            Ok(())
+            audioipc::server_platform_init();
         },
         move || {
             unregister_thread(thread_destroy_callback);
+            trace!("Stopping {} thread", rpc_name);
         },
     )
     .map_err(|e| {
-        debug!(
-            "Failed to start cubeb audio callback event loop thread: {:?}",
-            e
-        );
+        debug!("Failed to start {} thread: {:?}", rpc_name, e);
         e
     })?;
 
-    let core_thread = core::spawn_thread(
-        "AudioIPC Server RPC",
+    let callback_name = "AudioIPC Server Callback";
+    let callback_thread = ipccore::EventLoopThread::new(
+        callback_name.to_string(),
+        None,
         move || {
+            trace!("Starting {} thread", callback_name);
+            if let Err(e) = promote_current_thread_to_real_time(0, 48000) {
+                debug!(
+                    "Failed to promote {} thread to real-time: {:?}",
+                    callback_name, e
+                );
+            }
             register_thread(thread_create_callback);
-            audioipc::server_platform_init();
-            Ok(())
         },
         move || {
             unregister_thread(thread_destroy_callback);
+            trace!("Stopping {} thread", callback_name);
         },
     )
     .map_err(|e| {
-        debug!("Failed to cubeb audio core event loop thread: {:?}", e);
+        debug!("Failed to start {} thread: {:?}", callback_name, e);
+        e
+    })?;
+
+    let device_collection_name = "AudioIPC DeviceCollection RPC";
+    let device_collection_thread = ipccore::EventLoopThread::new(
+        device_collection_name.to_string(),
+        None,
+        move || {
+            trace!("Starting {} thread", device_collection_name);
+            register_thread(thread_create_callback);
+        },
+        move || {
+            unregister_thread(thread_destroy_callback);
+            trace!("Stopping {} thread", device_collection_name);
+        },
+    )
+    .map_err(|e| {
+        debug!("Failed to start {} thread: {:?}", device_collection_name, e);
         e
     })?;
 
     Ok(ServerWrapper {
-        core_thread,
+        rpc_thread,
         callback_thread,
+        device_collection_thread,
     })
 }
 
@@ -136,7 +151,7 @@ pub struct AudioIpcServerInitParams {
 
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
-pub unsafe extern "C" fn audioipc_server_start(
+pub unsafe extern "C" fn audioipc2_server_start(
     context_name: *const std::os::raw::c_char,
     backend_name: *const std::os::raw::c_char,
     init_params: *const AudioIpcServerInitParams,
@@ -144,7 +159,7 @@ pub unsafe extern "C" fn audioipc_server_start(
     assert!(!init_params.is_null());
     let mut params = G_CUBEB_CONTEXT_PARAMS.lock().unwrap();
     if !context_name.is_null() {
-        params.context_name = CStr::from_ptr(context_name).to_owned();
+        CStr::from_ptr(context_name).clone_into(&mut params.context_name);
     }
     if !backend_name.is_null() {
         let backend_string = CStr::from_ptr(backend_name).to_owned();
@@ -162,47 +177,45 @@ pub unsafe extern "C" fn audioipc_server_start(
 // A `shm_area_size` of 0 allows the server to calculate an appropriate shm size for each stream.
 // A non-zero `shm_area_size` forces all allocations to the specified size.
 #[no_mangle]
-pub extern "C" fn audioipc_server_new_client(
+pub extern "C" fn audioipc2_server_new_client(
     p: *mut c_void,
     shm_area_size: usize,
 ) -> PlatformHandleType {
-    let (wait_tx, wait_rx) = oneshot::channel();
     let wrapper: &ServerWrapper = unsafe { &*(p as *mut _) };
 
-    let callback_thread_handle = wrapper.callback_thread.handle();
-
     // We create a connected pair of anonymous IPC endpoints. One side
-    // is registered with the reactor core, the other side is returned
-    // to the caller.
-    MessageStream::anonymous_ipc_pair()
-        .map(|(ipc_server, ipc_client)| {
-            // Spawn closure to run on same thread as reactor::Core
-            // via remote handle.
-            wrapper
-                .core_thread
-                .handle()
-                .spawn(futures::future::lazy(move || {
-                    trace!("Incoming connection");
-                    let handle = reactor::Handle::default();
-                    ipc_server.into_tokio_ipc(&handle)
-                    .map(|sock| {
-                        let transport = framed(sock, Default::default());
-                        rpc::bind_server(transport, server::CubebServer::new(callback_thread_handle, shm_area_size));
-                    }).map_err(|_| ())
-                    // Notify waiting thread that server has been registered.
-                    .and_then(|_| wait_tx.send(()))
-                }))
-                .expect("Failed to spawn CubebServer");
-            // Wait for notification that server has been registered
-            // with reactor::Core.
-            let _ = wait_rx.wait();
-            unsafe { PlatformHandle::from(ipc_client).into_raw() }
-        })
-        .unwrap_or(audioipc::INVALID_HANDLE_VALUE)
+    // is registered with the event loop core, the other side is returned
+    // to the caller to be remoted to the client to complete setup.
+    let (server_pipe, client_pipe) = match sys::make_pipe_pair() {
+        Ok((server_pipe, client_pipe)) => (server_pipe, client_pipe),
+        Err(e) => {
+            error!(
+                "audioipc_server_new_client - make_pipe_pair failed: {:?}",
+                e
+            );
+            return audioipc::INVALID_HANDLE_VALUE;
+        }
+    };
+
+    let rpc_thread = wrapper.rpc_thread.handle();
+    let callback_thread = wrapper.callback_thread.handle();
+    let device_collection_thread = wrapper.device_collection_thread.handle();
+
+    let server = server::CubebServer::new(
+        callback_thread.clone(),
+        device_collection_thread.clone(),
+        shm_area_size,
+    );
+    if let Err(e) = rpc_thread.bind_server(server, server_pipe) {
+        error!("audioipc_server_new_client - bind_server failed: {:?}", e);
+        return audioipc::INVALID_HANDLE_VALUE;
+    }
+
+    unsafe { client_pipe.into_raw() }
 }
 
 #[no_mangle]
-pub extern "C" fn audioipc_server_stop(p: *mut c_void) {
+pub extern "C" fn audioipc2_server_stop(p: *mut c_void) {
     let wrapper = unsafe { Box::<ServerWrapper>::from_raw(p as *mut _) };
     drop(wrapper);
 }

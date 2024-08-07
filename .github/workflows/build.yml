@@ -1,4 +1,6 @@
 name: Build
+env:
+  RUST_BACKTRACE: 1
 
 on: [push, pull_request]
 
@@ -9,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-20.04, windows-2019, macos-10.15]
+        os: [ubuntu-20.04, windows-2019, macos-12]
         rust: [stable]
         experimental: [false]
         include:
@@ -19,7 +21,7 @@ jobs:
           - os: windows-2019
             rust: nightly
             experimental: true
-          - os: macos-10.15
+          - os: macos-12
             rust: nightly
             experimental: true
 
@@ -27,6 +29,10 @@ jobs:
     - uses: actions/checkout@v2
       with:
         submodules: recursive
+
+    - name: Install Dependencies (Linux)
+      run: sudo apt-get update && sudo apt-get install libdbus-1-dev
+      if: matrix.os == 'ubuntu-20.04'
 
     - name: Install Rust
       run: rustup toolchain install ${{ matrix.rust }} --profile minimal --component rustfmt clippy

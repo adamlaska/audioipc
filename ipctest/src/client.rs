@@ -3,7 +3,7 @@
 // This program is made available under an ISC-style license.  See the
 // accompanying file LICENSE for details.
 
-use cubeb::{self, ffi, Sample};
+use cubeb::{ffi, Sample};
 use std::f32::consts::PI;
 use std::ffi::CString;
 use std::ptr;
@@ -53,16 +53,16 @@ fn print_device_info(info: &cubeb::DeviceInfo) {
 
     let mut devfmts = "".to_string();
     if info.format().contains(cubeb::DeviceFormat::S16LE) {
-        devfmts = format!("{} S16LE", devfmts);
+        devfmts = format!("{devfmts} S16LE");
     }
     if info.format().contains(cubeb::DeviceFormat::S16BE) {
-        devfmts = format!("{} S16BE", devfmts);
+        devfmts = format!("{devfmts} S16BE");
     }
     if info.format().contains(cubeb::DeviceFormat::F32LE) {
-        devfmts = format!("{} F32LE", devfmts);
+        devfmts = format!("{devfmts} F32LE");
     }
     if info.format().contains(cubeb::DeviceFormat::F32BE) {
-        devfmts = format!("{} F32BE", devfmts);
+        devfmts = format!("{devfmts} F32BE");
     }
 
     if let Some(device_id) = info.device_id() {
@@ -71,19 +71,19 @@ fn print_device_info(info: &cubeb::DeviceInfo) {
         } else {
             " (PREFERRED)"
         };
-        println!("dev: \"{}\"{}", device_id, preferred);
+        println!("dev: \"{device_id}\"{preferred}");
     }
     if let Some(friendly_name) = info.friendly_name() {
-        println!("\tName:    \"{}\"", friendly_name);
+        println!("\tName:    \"{friendly_name}\"");
     }
     if let Some(group_id) = info.group_id() {
-        println!("\tGroup:   \"{}\"", group_id);
+        println!("\tGroup:   \"{group_id}\"");
     }
     if let Some(vendor_name) = info.vendor_name() {
-        println!("\tVendor:  \"{}\"", vendor_name);
+        println!("\tVendor:  \"{vendor_name}\"");
     }
-    println!("\tType:    {}", devtype);
-    println!("\tState:   {}", devstate);
+    println!("\tType:    {devtype}");
+    println!("\tState:   {devstate}");
     println!("\tCh:      {}", info.max_channels());
     println!(
         "\tFormat:  {} (0x{:x}) (default: {})",
@@ -156,12 +156,13 @@ pub fn client_test(handle: audioipc::PlatformHandleType) -> Result<()> {
     let init_params = audioipc_client::AudioIpcInitParams {
         server_connection: handle,
         pool_size: 1,
-        stack_size: 64 * 1024,
+        stack_size: 64 * 4096,
         thread_create_callback: None,
         thread_destroy_callback: None,
     };
-    if unsafe { audioipc_client::audioipc_client_init(&mut c, context_name.as_ptr(), &init_params) }
-        < 0
+    if unsafe {
+        audioipc_client::audioipc2_client_init(&mut c, context_name.as_ptr(), &init_params)
+    } < 0
     {
         return Err("Failed to connect to remote cubeb server.".into());
     }
@@ -181,9 +182,9 @@ pub fn client_test(handle: audioipc::PlatformHandleType) -> Result<()> {
     let latency = query!(ctx.min_latency(&params));
 
     println!("Cubeb backend: {}", ctx.backend_id());
-    println!("Max Channels: {}", channels);
-    println!("Min Latency: {}", latency);
-    println!("Preferred Rate: {}", rate);
+    println!("Max Channels: {channels}");
+    println!("Min Latency: {latency}");
+    println!("Preferred Rate: {rate}");
 
     enumerate_devices(&ctx)?;
 
@@ -215,7 +216,7 @@ pub fn client_test(handle: audioipc::PlatformHandleType) -> Result<()> {
 
             output.len() as isize
         })
-        .state_callback(|state| println!("stream {:?}", state));
+        .state_callback(|state| println!("stream {state:?}"));
 
     let stream = query!(builder.init(&ctx));
 

@@ -5,8 +5,6 @@
 #![warn(unused_extern_crates)]
 
 #[macro_use]
-extern crate cubeb_backend;
-#[macro_use]
 extern crate log;
 
 #[macro_use]
@@ -20,8 +18,8 @@ use audioipc::PlatformHandleType;
 use cubeb_backend::{capi, ffi};
 use std::os::raw::{c_char, c_int};
 
-thread_local!(static IN_CALLBACK: std::cell::RefCell<bool> = std::cell::RefCell::new(false));
-thread_local!(static AUDIOIPC_INIT_PARAMS: std::cell::RefCell<Option<AudioIpcInitParams>> = std::cell::RefCell::new(None));
+thread_local!(static IN_CALLBACK: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) });
+thread_local!(static AUDIOIPC_INIT_PARAMS: std::cell::RefCell<Option<AudioIpcInitParams>> = const { std::cell::RefCell::new(None) });
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -65,7 +63,7 @@ fn assert_not_in_callback() {
 #[allow(clippy::missing_safety_doc)]
 #[no_mangle]
 /// Entry point from C code.
-pub unsafe extern "C" fn audioipc_client_init(
+pub unsafe extern "C" fn audioipc2_client_init(
     c: *mut *mut ffi::cubeb,
     context_name: *const c_char,
     init_params: *const AudioIpcInitParams,

@@ -1,16 +1,16 @@
 [package]
 name = "ipctest"
-version = "0.1.0"
+version = "0.6.0"
 authors = ["Dan Glastonbury <dan.glastonbury@gmail.com>"]
 license = "ISC"
 edition = "2018"
 
 [dependencies]
-audioipc = { path = "../audioipc" }
-audioipc-client= { path = "../client" }
-audioipc-server = { path = "../server" }
-cubeb = "0.10.0"
-env_logger = "0.4.3"
+audioipc = { package = "audioipc2", path = "../audioipc" }
+audioipc-client = { package = "audioipc2-client", path = "../client" }
+audioipc-server = { package = "audioipc2-server", path = "../server" }
+cubeb = "0.13"
+env_logger = "0.9"
 error-chain = "0.12.0"
 log = "0.4"
 
@@ -18,4 +18,7 @@ log = "0.4"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-winapi = "0.3.6"
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
